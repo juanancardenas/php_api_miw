@@ -19,6 +19,8 @@ use JsonSerializable;
 )]
 class Result implements JsonSerializable
 {
+    public final const string RESULT_ATTR = 'result';
+
     #[ORM\Column(
         name: 'id',
         type: 'integer',
