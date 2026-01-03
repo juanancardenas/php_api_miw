@@ -272,14 +272,6 @@ paths:
           operationId: api_results_cget
           security:
               - MiWApiSecurity: []
-          parameters:
-              - name: sort
-                in: query
-                description: Sort results by field
-                required: false
-                schema:
-                    type: string
-                    enum: [ id, user, result ]
           responses:
               '200':
                   description: 'Array of results'
