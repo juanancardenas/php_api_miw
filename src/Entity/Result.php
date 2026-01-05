@@ -19,7 +19,10 @@ use JsonSerializable;
 )]
 class Result implements JsonSerializable
 {
+    public final const string ID_ATTR = 'id';
     public final const string RESULT_ATTR = 'result';
+    public final const string USER_ATTR = 'user';
+    public final const string TIME_ATTR = 'time';
 
     #[ORM\Column(
         name: 'id',
@@ -51,7 +54,7 @@ class Result implements JsonSerializable
     )]
     protected DateTime $time;
 
-    public function __construct(int $result, User $user, ?DateTime $time = null)
+    public function __construct(int $result, User $user, DateTime $time)
     {
         $this->result = $result;
         $this->user   = $user;

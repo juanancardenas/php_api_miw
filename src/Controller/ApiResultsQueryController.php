@@ -25,6 +25,7 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
     private const string HEADER_CACHE_CONTROL = 'Cache-Control';
     private const string HEADER_ETAG = 'ETag';
     private const string HEADER_ALLOW = 'Allow';
+    private const string ROLE_ADMIN = 'ROLE_ADMIN';
 
     /**
      * Constructor de la clase que gestiona los comandos tipo Query (CGET, GET y OPTIONS) y que
@@ -40,8 +41,10 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
 
     /**
      * Implementación de la operación CGET
-     * @see ApiResultsQueryInterface::cgetAction()
+     * @param Request $request
+     * @return Response
      * @throws JsonException
+     * @see ApiResultsQueryInterface::cgetAction()
      */
     #[Route(
         path: ".{_format}/{sort?id}",
@@ -72,7 +75,7 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
         $order = strval($request->attributes->get('sort'));
 
         // Si el usuario es Admin tiene acceso a todos los resultados, si no, sólo a los propios
-        $criteria = $this->isGranted('ROLE_ADMIN')
+        $criteria = $this->isGranted(self::ROLE_ADMIN)
             ? []
             : ['user' => $loggedUser];
 
@@ -112,8 +115,11 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
 
     /**
      * Implementación de la operación GET
+     * @param Request $request
+     * @param int $resultId
+     * @return Response
+     * @throws \JsonException
      * @see ApiResultsQueryInterface::getAction()
-     * @throws JsonException
      */
     #[Route(
         path: "/{resultId}.{_format}",
@@ -140,7 +146,7 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
             );
         }
 
-        $criteria = $this->isGranted('ROLE_ADMIN')
+        $criteria = $this->isGranted(self::ROLE_ADMIN)
             ? ['id' => $resultId]
             : ['id' => $resultId, 'user' => $loggedUser];
 
@@ -175,8 +181,8 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
 
     /**
      * Implementación de la operación OPTIONS
-     * @see ApiResultsQueryInterface::optionsAction()
      * @throws JsonException
+     * @see ApiResultsQueryInterface::optionsAction()
      */
     #[Route(
         path: "/{resultId}.{_format}",
@@ -207,6 +213,9 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
 
     /**
      * Chequea si el usuario está autenticado y saca log
+     * @param string $action
+     * @return User|null
+     * @see ApiResultsQueryInterface::optionsAction()
      */
     private function assertAuthenticated(string $action): ?User
     {
