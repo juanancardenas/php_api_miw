@@ -14,6 +14,15 @@ interface ApiResultsQueryInterface
 {
     public final const string RUTA_API = '/api/v1/results';
 
+    public final const string ROLE_ADMIN = 'ROLE_ADMIN';
+    public final const string HEADER_CACHE_CONTROL = 'Cache-Control';
+    public final const string HEADER_ETAG = 'ETag';
+    public final const string HEADER_ALLOW = 'Allow';
+    public final const string MSG_UNAUTHORIZED = 'UNAUTHORIZED: Invalid credentials';
+    public final const string MSG_NOT_FOUND = 'NOT FOUND: Result not found';
+    public final const string MSG_NOT_MODIFIED = 'NOT MODIFIED: Resource has not been modified';
+    public final const string MSG_ERROR_ETAG = 'SERVER ERROR: Error generating ETag';
+
     /**
      * **CGET** Action<br><br>
      * Summary: Retrieves the collection of Result resources.<br>

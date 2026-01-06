@@ -288,6 +288,8 @@ paths:
           $ref: '#/components/responses/401_Unauthorized_Response'
         '404':
           $ref: '#/components/responses/404_Resource_Not_Found_Response'
+        '500':
+          $ref: '#/components/responses/500_Internal_Server_Error_Response'
     head:
       tags: [ '📊 Results' ]
       summary: Retrieves the collection of Result resources.
@@ -304,6 +306,8 @@ paths:
           $ref: '#/components/responses/401_Unauthorized_Response'
         '404':
           $ref: '#/components/responses/404_Resource_Not_Found_Response'
+        '500':
+            $ref: '#/components/responses/500_Internal_Server_Error_Response'
     options:
       tags: [ '📊 Results' ]
       summary: Provides the list of HTTP supported methods.
@@ -363,6 +367,8 @@ paths:
           $ref: '#/components/responses/401_Unauthorized_Response'
         '404':
           $ref: '#/components/responses/404_Resource_Not_Found_Response'
+        '500':
+            $ref: '#/components/responses/500_Internal_Server_Error_Response'
     head:
       tags: [ '📊 Results' ]
       summary: Retrieves a Result resource based on a single ID.
@@ -381,6 +387,8 @@ paths:
           $ref: '#/components/responses/401_Unauthorized_Response'
         '404':
           $ref: '#/components/responses/404_Resource_Not_Found_Response'
+        '500':
+            $ref: '#/components/responses/500_Internal_Server_Error_Response'
     options:
       tags: [ '📊 Results' ]
       summary: Provides the list of HTTP supported methods.
@@ -440,6 +448,8 @@ paths:
           $ref: '#/components/responses/404_Resource_Not_Found_Response'
         '412':
           $ref: '#/components/responses/412_Precondition_Failed_Response'
+        '500':
+            $ref: '#/components/responses/500_Internal_Server_Error_Response'
 components:
   headers:
     ETag:
@@ -587,6 +597,15 @@ components:
           examples:
             response-422:
               $ref: '#/components/examples/response-422'
+    500_Internal_Server_Error_Response:
+      description: "`INTERNAL SERVER ERROR`: something came wrong in server side"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Message'
+          examples:
+            response-422:
+              $ref: '#/components/examples/response-500'
 
   requestBodies:
     UserRequestBody:
@@ -712,6 +731,10 @@ components:
       value:
         code: 422
         message: 'UNPROCESSABLE ENTITY: e-mail or password is left out'
+    response-500:
+      value:
+        code: 500
+        message: 'INTERNAL SERVER ERROR: etag could not be generated successfully'
 
   securitySchemes:
     MiWApiSecurity:

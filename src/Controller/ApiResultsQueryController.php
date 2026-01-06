@@ -6,8 +6,11 @@ use App\Entity\Result;
 use App\Entity\User;
 use App\Utility\Utils;
 use Doctrine\ORM\EntityManagerInterface;
+use Exception;
 use Symfony\Component\HttpFoundation\{Exception\JsonException, Request, Response};
 use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpKernel\Exception\HttpException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 
@@ -22,11 +25,6 @@ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 )]
 class ApiResultsQueryController extends AbstractController implements ApiResultsQueryInterface
 {
-    private const string HEADER_CACHE_CONTROL = 'Cache-Control';
-    private const string HEADER_ETAG = 'ETag';
-    private const string HEADER_ALLOW = 'Allow';
-    private const string ROLE_ADMIN = 'ROLE_ADMIN';
-
     /**
      * Constructor de la clase que gestiona los comandos tipo Query (CGET, GET y OPTIONS) y que
      * inyecta el EntityManager para que usado en los métodos de implentación de operación HTTP
@@ -35,15 +33,15 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
      */
     public function __construct(
         private readonly EntityManagerInterface $entityManager,
-        private readonly LoggerInterface $logger
-    ) {
+        private readonly LoggerInterface        $logger
+    )
+    {
     }
 
     /**
      * Implementación de la operación CGET
      * @param Request $request
      * @return Response
-     * @throws JsonException
      * @see ApiResultsQueryInterface::cgetAction()
      */
     #[Route(
@@ -53,64 +51,38 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
             'sort' => "id|user|result",
             '_format' => "json|xml"
         ],
-        defaults: [ 'sort' => 'id', '_format' => 'json', ],
-        methods: [ Request::METHOD_GET, Request::METHOD_HEAD ],
+        defaults: ['sort' => 'id', '_format' => 'json',],
+        methods: [Request::METHOD_GET, Request::METHOD_HEAD],
     )]
     public function cgetAction(Request $request): Response
     {
         $format = Utils::getFormat($request);
+        try {
+            // Obtener usuario logado o HTTP Error 401 (Unauthorized) si no está logado
+            $loggedUser = $this->checkUserAuthenticated('CGET');
 
-        // Obtenemos usuario logado. Null si no está logado
-        $loggedUser = $this->assertAuthenticated('CGET');
-        if (!$loggedUser instanceof User) {
-            // 401: No Authorized
+            // Obtener todos los resultados del usuario
+            $order = $request->attributes->get('sort', 'id');
+
+            $results = $this->readAllResults(
+                $order,
+                $this->isGranted(self::ROLE_ADMIN),
+                $loggedUser
+            );
+
+            // Validación de caché por ETag
+            $etag = $this->checkCGetCache($request, $results);
+
+            // Devolver resultado de la acción HTTP
+            return $this->buildCGetResponse($results, $etag, $format, $request);
+
+        } catch (HttpExceptionInterface $error) {
             return Utils::errorMessage(
-                Response::HTTP_UNAUTHORIZED,
-                'UNAUTHORIZED: Invalid credentials.',
+                $error->getStatusCode(),
+                $error->getMessage() ?: null,
                 $format
             );
         }
-
-        // Ordenar por parámetro seleccinado
-        $order = strval($request->attributes->get('sort'));
-
-        // Si el usuario es Admin tiene acceso a todos los resultados, si no, sólo a los propios
-        $criteria = $this->isGranted(self::ROLE_ADMIN)
-            ? []
-            : ['user' => $loggedUser];
-
-        // Se hace la consulta
-        $results = $this->entityManager
-            ->getRepository(Result::class)
-            ->findBy(
-                $criteria,
-                [$order => 'ASC']
-            );
-
-        // No hay resultados (404: Not found)
-        if (empty($results)) {
-            return Utils::errorMessage(Response::HTTP_NOT_FOUND, null, $format);
-        }
-
-        // Caching with ETag (304: Not Modified)
-        $etag = md5((string) json_encode($results, JSON_THROW_ON_ERROR));
-        if (($etags = $request->getETags()) && (in_array($etag, $etags) || in_array('*', $etags))) {
-            return new Response()->setNotModified();
-        }
-
-        return Utils::apiResponse(
-            Response::HTTP_OK,
-            ($request->isMethod(Request::METHOD_GET))
-                ? [ 'results' => array_map(
-                      fn ($res) =>  ['result' => $res], $results
-                     )]  // GET method
-                : null,  // HEAD method
-            $format,
-            [
-                self::HEADER_CACHE_CONTROL => 'private',
-                self::HEADER_ETAG => $etag,
-            ]
-        );
     }
 
     /**
@@ -118,7 +90,6 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
      * @param Request $request
      * @param int $resultId
      * @return Response
-     * @throws \JsonException
      * @see ApiResultsQueryInterface::getAction()
      */
     #[Route(
@@ -128,55 +99,32 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
             "resultId" => "\d+",
             '_format' => "json|xml"
         ],
-        defaults: [ '_format' => 'json' ],
-        methods: [ Request::METHOD_GET, Request::METHOD_HEAD ],
+        defaults: ['_format' => 'json'],
+        methods: [Request::METHOD_GET, Request::METHOD_HEAD],
     )]
     public function getAction(Request $request, int $resultId): Response
     {
         $format = Utils::getFormat($request);
+        try {
+            // Obtener usuario logado o HTTP Error 401 (Unauthorized) si no está logado
+            $loggedUser = $this->checkUserAuthenticated('GET');
 
-        // Obtenemos usuario logado. Null si no está logado
-        $loggedUser = $this->assertAuthenticated('GET');
-        if (!$loggedUser instanceof User) {
-            // 401: No Authorized
+            // Leer el resultado
+            $result = $this->readResult($resultId, $loggedUser, $this->isGranted(self::ROLE_ADMIN));
+
+            // Validación de caché por ETag
+            $etag = $this->checkGetCache($request, $result);
+
+            // Devolver resultado de la acción HTTP
+            return $this->buildGetResponse($result, $etag, $format, $request);
+
+        } catch (HttpExceptionInterface $error) {
             return Utils::errorMessage(
-                Response::HTTP_UNAUTHORIZED,
-                'UNAUTHORIZED: Invalid credentials.',
+                $error->getStatusCode(),
+                $error->getMessage() ?: null,
                 $format
             );
         }
-
-        $criteria = $this->isGranted(self::ROLE_ADMIN)
-            ? ['id' => $resultId]
-            : ['id' => $resultId, 'user' => $loggedUser];
-
-        // Se hace la consulta
-        $result = $this->entityManager
-            ->getRepository(Result::class)
-            ->findOneBy($criteria);
-
-        // No hay resultado (404: Not found)
-        if (!$result instanceof Result) {
-            return Utils::errorMessage(Response::HTTP_NOT_FOUND, null, $format);
-        }
-
-        // Caching with ETag (304: Not Modified)
-        $etag = md5(json_encode($result, JSON_THROW_ON_ERROR));
-        if (($etags = $request->getETags()) && (in_array($etag, $etags) || in_array('*', $etags))) {
-            return new Response()->setNotModified();
-        }
-
-        return Utils::apiResponse(
-            Response::HTTP_OK,
-            ($request->isMethod(Request::METHOD_GET))
-                ? [ Result::RESULT_ATTR => $result ]  // GET method
-                : null,                               // HEAD method
-            $format,
-            [
-                self::HEADER_CACHE_CONTROL => 'private',
-                self::HEADER_ETAG => $etag,
-            ]
-        );
     }
 
     /**
@@ -191,14 +139,14 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
             'resultId' => "\d+",
             '_format' => "json|xml"
         ],
-        defaults: [ 'resultId' => 0, '_format' => 'json' ],
-        methods: [ Request::METHOD_OPTIONS ],
+        defaults: ['resultId' => 0, '_format' => 'json'],
+        methods: [Request::METHOD_OPTIONS],
     )]
     public function optionsAction(int|null $resultId): Response
     {
         $methods = $resultId !== 0
-            ? [ Request::METHOD_GET, Request::METHOD_PUT, Request::METHOD_DELETE ]
-            : [ Request::METHOD_GET, Request::METHOD_POST ];
+            ? [Request::METHOD_GET, Request::METHOD_PUT, Request::METHOD_DELETE]
+            : [Request::METHOD_GET, Request::METHOD_POST];
         $methods[] = Request::METHOD_OPTIONS;
 
         return new Response(
@@ -211,16 +159,17 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
         );
     }
 
+    /* Métodos auxiliares usados por las acciones */
+
     /**
-     * Chequea si el usuario está autenticado y saca log
+     * Chequea si el usuario está autenticado y saca log de la acción en curso
      * @param string $action
-     * @return User|null
-     * @see ApiResultsQueryInterface::optionsAction()
+     * @return User
      */
-    private function assertAuthenticated(string $action): ?User
+    private function checkUserAuthenticated(string $action): User
     {
         if (!$this->isGranted('IS_AUTHENTICATED_FULLY')) {
-            return null;
+            throw new HttpException(Response::HTTP_UNAUTHORIZED, self::MSG_UNAUTHORIZED);
         }
 
         /** @var User $user */
@@ -233,5 +182,145 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
         ]);
 
         return $user;
+    }
+
+    /**
+     * Lanza una query para obtener un resultado
+     * @param int $resultId
+     * @param User $loggedUser
+     * @param bool $isAdmin
+     * @return Result
+     */
+    private function readResult(int $resultId, User $loggedUser, bool $isAdmin): Result
+    {
+        $criteria = $isAdmin
+            ? ['id' => $resultId]
+            : ['id' => $resultId, 'user' => $loggedUser];
+
+        // Se hace la consulta
+        $result = $this->entityManager
+            ->getRepository(Result::class)
+            ->findOneBy($criteria);
+
+        if (!$result instanceof Result) {
+            // No hay resultado (404: Not found) - Evita antipatrón 403, no dar más información de la necesaria
+            throw new HttpException(Response::HTTP_NOT_FOUND, self::MSG_NOT_FOUND);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Lanza una query para obtener todos los resultados del usuario logado
+     * @param string $order
+     * @param bool $isAdmin
+     * @param User $loggedUser
+     * @return array
+     */
+    private function readAllResults(string $order, bool $isAdmin, User $loggedUser): array
+    {
+        // Si el usuario es Admin tiene acceso a todos los resultados, si no, sólo a los suyos
+        $criteria = $isAdmin
+            ? []
+            : ['user' => $loggedUser];
+
+        // Se hace la consulta
+        $results = $this->entityManager
+            ->getRepository(Result::class)
+            ->findBy(
+                $criteria,
+                [$order => 'ASC']
+            );
+
+        return empty($results)
+            ? throw new HttpException(Response::HTTP_NOT_FOUND, self::MSG_NOT_FOUND)
+            : $results;
+    }
+
+    /**
+     * Validación de caché para un recurso por ETag
+     * @param Request $request
+     * @param Result $result
+     * @return string
+     */
+    private function checkGetCache(Request $request, Result $result): string
+    {
+        $etag = Utils::generateResultETag($result);
+
+        if ($request->headers->has('If-None-Match') && $etag === $request->headers->get('If-None-Match')) {
+            throw new HttpException(
+                Response::HTTP_NOT_MODIFIED,
+                self::MSG_NOT_MODIFIED
+            );
+        }
+
+        return $etag;
+    }
+
+    /**
+     * Validación de caché para una colección de recursos por ETag
+     * @param Request $request
+     * @param array $results
+     * @return string
+     */
+    private function checkCGetCache(Request $request, array $results): string
+    {
+        $etag = Utils::generateResultsCollectionETag($results);
+
+        if ($request->headers->has('If-None-Match') && $etag === $request->headers->get('If-None-Match')) {
+            throw new HttpException(
+                Response::HTTP_NOT_MODIFIED,
+                self::MSG_NOT_MODIFIED
+            );
+        }
+
+        return $etag;
+    }
+
+    /**
+     * Crea la respuesta de la operación GET, enviando un 200, el resultado y el etag.
+     * @param Result $result
+     * @param string $etag
+     * @param string $format
+     * @param Request $request
+     * @return Response
+     */
+    private function buildGetResponse(Result $result, string $etag, string $format, Request $request): Response
+    {
+        return Utils::apiResponse(
+            Response::HTTP_OK,
+            ($request->isMethod(Request::METHOD_GET))
+                ? [Result::RESULT_ATTR => $result]  // GET method
+                : null,                             // HEAD method
+            $format,
+            [
+                self::HEADER_CACHE_CONTROL => 'private',
+                self::HEADER_ETAG => $etag
+            ]
+        );
+    }
+
+    /**
+     * Crea la respuesta de la operación CGET, enviando un 200, los resultados y el etag.
+     * @param array $results
+     * @param string $etag
+     * @param string $format
+     * @param Request $request
+     * @return Response
+     */
+    private function buildCGetResponse(array $results, string $etag, string $format, Request $request): Response
+    {
+        // 200: OK
+        return Utils::apiResponse(
+            Response::HTTP_OK,
+            ($request->isMethod(Request::METHOD_GET))
+                ? [ 'results' => array_map(fn ($res) =>  ['result' => $res], $results)]  // GET method
+                : null,                                                                  // HEAD method
+            $format,
+            [
+                self::HEADER_CACHE_CONTROL => 'private',
+                self::HEADER_ETAG => $etag,
+            ]
+        );
     }
 }

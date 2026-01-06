@@ -3,7 +3,6 @@
 namespace App\Controller;
 
 use Exception;
-use JsonException;
 use App\Entity\{Result, User};
 use App\Utility\Utils;
 use DateTime;
@@ -20,16 +19,6 @@ use Symfony\Component\Routing\Attribute\Route;
 )]
 class ApiResultsCommandController extends AbstractController implements ApiResultsCommandInterface
 {
-    private const string ROLE_ADMIN = 'ROLE_ADMIN';
-    private const string MSG_UNAUTHORIZED = 'UNAUTHORIZED: Invalid credentials';
-    private const string MSG_NOT_FOUND = 'NOT FOUND: Result not found';
-    private const string MSG_FAILED_ETAG = 'PRECONDITION FAILED: failed to validate ETag header';
-    private const string MSG_MISSING_FIELDS = 'BAD REQUEST: Missing fields in the request';
-    private const string MSG_NOT_ALLOW = 'BAD REQUEST: Fields not allow to be included in the request';
-    private const string MSG_WRONG_RESULT = 'UNPROCESSABLE: Wrong result value';
-    private const string MSG_WRONG_TIME = 'UNPROCESSABLE: Wrong time value';
-    private const string MSG_WRONG_USERID = 'UNPROCESSABLE: Wrong userid value';
-
     /**
      * Constructor de la clase que gestiona los comandos tipo Command (DELETE, POST y PUT) y que
      * inyecta el EntityManager para que sea usado en los métodos de implentación de operación HTTP
@@ -62,7 +51,6 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
     public function deleteAction(Request $request, int $resultId): Response
     {
         $format = Utils::getFormat($request);
-
         try {
             // Obtener usuario logado o HTTP Error 401 (Unauthorized) si no está logado
             $loggedUser = $this->checkUserAuthenticated('DELETE');
@@ -112,12 +100,12 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
 
             // Validación del los datos del payload
             $postData = $request->getPayload();
-            $time = $this->validatePayload($postData, $this->isGranted(self::ROLE_ADMIN));
+            $time = $this->validatePayload($postData, $this->isGranted(ApiResultsQueryInterface::ROLE_ADMIN));
 
             // Obtener el user: Si el usuario es un admin, podrá enviar el userId en el payload del POST indicando
             // un usuario distinto a sí mismo, si el usuario no es admin, no pondrá mandar el userId y el usuario
             // es él mismo. Permitiendo: Admin crear resultados de cualquier usuario y no-admin sólo los suyos.
-            $user = $this->getUserPost($loggedUser, $postData, $this->isGranted(self::ROLE_ADMIN));
+            $user = $this->getUserPost($loggedUser, $postData, $this->isGranted(ApiResultsQueryInterface::ROLE_ADMIN));
 
             // Crear el resultado
             $result = new Result(
@@ -150,7 +138,6 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
      * @param Request $request
      * @param int $resultId
      * @return Response
-     * @throws JsonException
      * @see ApiResultsCommandInterface::putAction()
      */
     #[Route(
@@ -173,30 +160,34 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
             // Si no es Administrador, el resultado debe ser propiedad del usuario logado
             $result = $this->readResult($resultId, $loggedUser);
 
-            $this->validateETag($request, $result);
+            // Control de concurrencia por ETag
+            $this->checkPutPrecondition($request, $result);
 
             // Validación del los datos del payload
             $postData = $request->getPayload();
-            $time = $this->validatePayload($postData, $this->isGranted(self::ROLE_ADMIN));
+            $time = $this->validatePayload($postData, $this->isGranted(ApiResultsQueryInterface::ROLE_ADMIN));
 
             // Actualizar el resultado
             $result->setTime($time);
             $result->setResult($postData->get(Result::RESULT_ATTR));
             // Sólo el administrador podría cambiar el usuario del resultado
-            if ($this->isGranted(self::ROLE_ADMIN)) {
+            if ($this->isGranted(ApiResultsQueryInterface::ROLE_ADMIN)) {
                 $result->setUser($this->getNewUser($result, $postData));
             }
 
             // Actualizar el Result en BD
             $this->entityManager->flush();
 
-            // Devolver resultado de la acción HTTP
-            return $this->buildPutResponse($result, $format);
+            // Generación del nuevo ETag
+            $etag = Utils::generateResultETag($result);
 
-        } catch (HttpExceptionInterface $e) {
+            // Devolver resultado de la acción HTTP
+            return $this->buildPutResponse($result, $format, $etag);
+
+        } catch (HttpExceptionInterface $error) {
             return Utils::errorMessage(
-                $e->getStatusCode(),
-                $e->getMessage() ?: null,
+                $error->getStatusCode(),
+                $error->getMessage() ?: null,
                 $format
             );
         }
@@ -304,7 +295,7 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
      */
     private function readResult(int $resultId, User $loggedUser): Result
     {
-        $criteria = $this->isGranted(self::ROLE_ADMIN)
+        $criteria = $this->isGranted(ApiResultsQueryInterface::ROLE_ADMIN)
             ? ['id' => $resultId]
             : ['id' => $resultId, 'user' => $loggedUser];
 
@@ -321,18 +312,27 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
     }
 
     /**
-     * Valida el ETag para comprobar si el recurso al que se le va a aplicar un PUT ha cambiado
+     * Validación de cambios en el recurso por ETag
      * @param Request $request
      * @param Result $result
      * @return void
-     * @throws JsonException
      */
-    private function validateETag(Request $request, Result $result): void
+    private function checkPutPrecondition(Request $request, Result $result): void
     {
-        $etag = md5(json_encode($result, JSON_THROW_ON_ERROR));
+        if (!$request->headers->has('If-Match')) {
+            throw new HttpException(
+                Response::HTTP_PRECONDITION_FAILED,
+                self::MSG_FAILED_ETAG
+            );
+        }
 
-        if (!$request->headers->has('If-Match') || $etag !== $request->headers->get('If-Match')) {
-            throw new HttpException(Response::HTTP_PRECONDITION_FAILED,self::MSG_FAILED_ETAG);
+        $etag = Utils::generateResultETag($result);
+
+        if ($etag !== $request->headers->get('If-Match')) {
+            throw new HttpException(
+                Response::HTTP_PRECONDITION_FAILED,
+                self::MSG_FAILED_ETAG
+            );
         }
     }
 
@@ -364,18 +364,15 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
      * Crea la respuesta de la operación PUT, enviando un 209 y el nuevo ETag.
      * @param Result $result
      * @param string $format
+     * @param string $etag
      * @return Response
-     * @throws JsonException
      */
-    private function buildPutResponse(Result $result, string $format): Response
+    private function buildPutResponse(Result $result, string $format, string $etag): Response
     {
-        // ETag del result después de actualizarse
-        $etag = md5(json_encode($result, JSON_THROW_ON_ERROR));
-
         // 209: Content Returned
         return Utils::apiResponse(
             209,
-            [ $result ],
+            [$result],
             $format,
             [
                 'ETag' => $etag,

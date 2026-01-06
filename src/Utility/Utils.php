@@ -2,7 +2,7 @@
 
 namespace App\Utility;
 
-use App\Entity\Message;
+use App\Entity\{ Message, Result};
 use JMS\Serializer\SerializerBuilder as JMSSerializer;
 use Symfony\Component\HttpFoundation\{Request, Response};
 
@@ -83,5 +83,44 @@ readonly class Utils
             $customMessage,
             $format
         );
+    }
+
+    /**
+     * Generar un código ETag para un resultado
+     * @param Result $result
+     * @return string
+     */
+    public static function generateResultETag(Result $result): string
+    {
+        return md5(sprintf(
+            '%d-%d-%s',
+            $result->getId(),
+            $result->getResult(),
+            $result->getTime()->getTimestamp()
+        ));
+    }
+
+    /**
+     * Generar un código ETag para una colección de resultados
+     * @param Result[] $results
+     * @return string
+     */
+    public static function generateResultsCollectionETag(array $results): string
+    {
+        $parts = [];
+
+        foreach ($results as $result) {
+            $parts[] = sprintf(
+                '%d-%d-%s',
+                $result->getId(),
+                $result->getResult(),
+                $result->getTime()->getTimestamp()
+            );
+        }
+
+        // El orden importa en CGET → garantizamos orden estable
+        sort($parts);
+
+        return md5(implode('|', $parts));
     }
 }

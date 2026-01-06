@@ -12,6 +12,16 @@ use Symfony\Component\HttpFoundation\{Request, Response};
  */
 interface ApiResultsCommandInterface
 {
+    public final const string MSG_UNAUTHORIZED = 'UNAUTHORIZED: Invalid credentials';
+    public final const string MSG_NOT_FOUND = 'NOT FOUND: Result not found';
+    public final const string MSG_FAILED_ETAG = 'PRECONDITION FAILED: failed to validate ETag header';
+    public final const string MSG_MISSING_FIELDS = 'BAD REQUEST: Missing fields in the request';
+    public final const string MSG_NOT_ALLOW = 'BAD REQUEST: Fields not allow to be included in the request';
+    public final const string MSG_WRONG_RESULT = 'UNPROCESSABLE: Wrong result value';
+    public final const string MSG_WRONG_TIME = 'UNPROCESSABLE: Wrong time value';
+    public final const string MSG_WRONG_USERID = 'UNPROCESSABLE: Wrong userid value';
+    public final const string MSG_ERROR_ETAG = 'SERVER ERROR: Error generating ETag';
+
     /**
      * **DELETE** Action<br><br>
      * Summary: Removes the Result resource<br>
