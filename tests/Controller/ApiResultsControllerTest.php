@@ -3,6 +3,7 @@
 namespace App\Tests\Controller;
 
 use App\Controller\ApiResultsQueryController;
+use DateMalformedStringException;
 use App\Entity\{Result, User};
 use DateTime;
 use Generator;
@@ -10,7 +11,6 @@ use JetBrains\PhpStorm\ArrayShape;
 use PHPUnit\Framework\Attributes\{CoversClass, DataProvider, Depends, Group};
 use PHPUnit\Framework\MockObject\Exception;
 use Symfony\Component\HttpFoundation\{ Request, Response};
-use Symfony\Component\Routing\Annotation\Route;
 
 #[Group('controllers')]
 #[CoversClass(ApiResultsQueryController::class)]
@@ -248,6 +248,8 @@ class ApiResultsControllerTest extends BaseTestCase
      * Test HEAD /results 200 OK
      * @return void
      */
+    #[Depends('testPostResultAction201Created')]
+    #[Depends('testGetResultAction200Ok')]
     public function testHeadResultsAction200Ok(): void
     {
         // Autenticación válida
@@ -274,6 +276,8 @@ class ApiResultsControllerTest extends BaseTestCase
      * Test HEAD /results 401 Unauthorized
      * @return void
      */
+    #[Depends('testPostResultAction201Created')]
+    #[Depends('testGetResultAction200Ok')]
     public function testHeadResultsAction401Unauthorized(): void
     {
         // Sin autenticación
@@ -290,6 +294,8 @@ class ApiResultsControllerTest extends BaseTestCase
      * Test HEAD /results 404 Not Found
      * @return void
      */
+    #[Depends('testPostResultAction201Created')]
+    #[Depends('testGetResultAction200Ok')]
     public function testHeadResultsAction404NotFound(): void
     {
         // Simulamos 404 forzando un endpoint que no exista
@@ -316,7 +322,8 @@ class ApiResultsControllerTest extends BaseTestCase
      * @return void
      */
     #[Depends('testPostResultAction201Created')]
-    public function testHeadResultAction200XmlOk(array $result): void
+    #[Depends('testGetResultAction200Ok')]
+    public function testHeadResultAction200Ok(array $result): void
     {
         self::$client->request(
             Request::METHOD_HEAD,
@@ -377,6 +384,7 @@ class ApiResultsControllerTest extends BaseTestCase
      * @return void
      */
     #[Depends('testPostResultAction201Created')]
+    #[Depends('testGetResultAction200Ok')]
     public function testHeadResultAction401Unauthorized(array $result): void
     {
         self::$client->request(
@@ -395,6 +403,7 @@ class ApiResultsControllerTest extends BaseTestCase
      * @return void
      */
     #[Depends('testPostResultAction201Created')]
+    #[Depends('testGetResultAction200Ok')]
     public function testHeadResultAction404NotFound(): void
     {
         self::$client->request(
@@ -477,7 +486,7 @@ class ApiResultsControllerTest extends BaseTestCase
      * @param array $result result returned by testPostResultAction201()
      * @param string $etag returned by testGetResultAction304NotModified()
      * @return array<string,string> modified result data
-     * @throws Exception
+     * @throws Exception|DateMalformedStringException
      */
     #[Depends('testPostResultAction201Created')]
     #[Depends('testGetResultAction304NotModified')]
@@ -494,13 +503,13 @@ class ApiResultsControllerTest extends BaseTestCase
         $resultObj = new Result(
             $result[Result::RESULT_ATTR],
             $userStub,
-            new \DateTime($result[Result::TIME_ATTR])
+            new DateTime($result[Result::TIME_ATTR])
         );
 
         // Payload correcto
         $p_data = [
             Result::RESULT_ATTR => self::$faker->numberBetween(1, 10000),
-            Result::TIME_ATTR   => (new \DateTime())->format('Y-m-d H:i:s'),
+            Result::TIME_ATTR   => new DateTime()->format('Y-m-d H:i:s'),
             Result::USER_ATTR   => $resultObj->getUser()->getId(),
         ];
 
@@ -710,9 +719,6 @@ class ApiResultsControllerTest extends BaseTestCase
             Response::HTTP_UNAUTHORIZED
         );
     }
-
-
-
 
     /**
      * * * * * * * * * *
