@@ -628,6 +628,9 @@ components:
               time:
                 type: string
                 format: date-time
+              userid:
+                type: integer
+                description: 'User id'
             examples:
               result:
                 result: 3200

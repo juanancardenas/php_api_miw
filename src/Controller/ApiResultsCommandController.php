@@ -2,14 +2,16 @@
 
 namespace App\Controller;
 
-use App\Entity\Result;
-use App\Entity\User;
+use Exception;
+use JsonException;
+use App\Entity\{Result, User};
 use App\Utility\Utils;
 use DateTime;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\{InputBag, Request, Response};
+use Symfony\Component\HttpKernel\Exception\{HttpException, HttpExceptionInterface};
 use Symfony\Component\Routing\Attribute\Route;
 
 #[Route(
@@ -19,7 +21,14 @@ use Symfony\Component\Routing\Attribute\Route;
 class ApiResultsCommandController extends AbstractController implements ApiResultsCommandInterface
 {
     private const string ROLE_ADMIN = 'ROLE_ADMIN';
-    private const string UNAUTHORIZED = 'UNAUTHORIZED: Invalid credentials.';
+    private const string MSG_UNAUTHORIZED = 'UNAUTHORIZED: Invalid credentials';
+    private const string MSG_NOT_FOUND = 'NOT FOUND: Result not found';
+    private const string MSG_FAILED_ETAG = 'PRECONDITION FAILED: failed to validate ETag header';
+    private const string MSG_MISSING_FIELDS = 'BAD REQUEST: Missing fields in the request';
+    private const string MSG_NOT_ALLOW = 'BAD REQUEST: Fields not allow to be included in the request';
+    private const string MSG_WRONG_RESULT = 'UNPROCESSABLE: Wrong result value';
+    private const string MSG_WRONG_TIME = 'UNPROCESSABLE: Wrong time value';
+    private const string MSG_WRONG_USERID = 'UNPROCESSABLE: Wrong userid value';
 
     /**
      * Constructor de la clase que gestiona los comandos tipo Command (DELETE, POST y PUT) y que
@@ -54,36 +63,27 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
     {
         $format = Utils::getFormat($request);
 
-        // Obtenemos usuario logado. Null si no está logado
-        $loggedUser = $this->assertAuthenticated('DELETE');
-        if (!$loggedUser instanceof User) {
-            // 401: No Authorized
+        try {
+            // Obtener usuario logado o HTTP Error 401 (Unauthorized) si no está logado
+            $loggedUser = $this->checkUserAuthenticated('DELETE');
+
+            // Si no es Administrador, el resultado debe ser propiedad del usuario logado
+            $result = $this->readResult($resultId, $loggedUser);
+
+            // Borrado del resultado
+            $this->entityManager->remove($result);
+            $this->entityManager->flush();
+
+            // Devolver resultado de la acción HTTP
+            return Utils::apiResponse(Response::HTTP_NO_CONTENT);
+
+        } catch (HttpExceptionInterface $error) {
             return Utils::errorMessage(
-                Response::HTTP_UNAUTHORIZED,
-                self::UNAUTHORIZED,
+                $error->getStatusCode(),
+                $error->getMessage() ?: null,
                 $format
             );
         }
-
-        // Si no es Administrador, el resultado debe ser propiedad del usuario logado
-        $criteria = $this->isGranted(self::ROLE_ADMIN)
-            ? ['id' => $resultId]
-            : ['id' => $resultId, 'user' => $loggedUser];
-
-        // Se hace la consulta
-        $result = $this->entityManager
-            ->getRepository(Result::class)
-            ->findOneBy($criteria);
-
-        // No hay resultado (404: Not found)
-        if (!$result instanceof Result) {
-            return Utils::errorMessage(Response::HTTP_NOT_FOUND, null, $format);
-        }
-
-        $this->entityManager->remove($result);
-        $this->entityManager->flush();
-
-        return Utils::apiResponse(Response::HTTP_NO_CONTENT);
     }
 
     /**
@@ -92,7 +92,6 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
      * sus propios resultados.
      * @param Request $request
      * @return Response
-     * @throws \DateMalformedStringException
      * @see ApiResultsCommandInterface::postAction()
      */
     #[Route(
@@ -107,61 +106,51 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
     public function postAction(Request $request): Response
     {
         $format = Utils::getFormat($request);
+        try {
+            // Obtener usuario logado o HTTP Error 401 (Unauthorized) si no está logado
+            $loggedUser = $this->checkUserAuthenticated('PUT');
 
-        // Obtenemos usuario logado. Null si no está logado
-        $loggedUser = $this->assertAuthenticated('POST');
-        if (!$loggedUser instanceof User) {
-            // 401: No Authorized
+            // Validación del los datos del payload
+            $postData = $request->getPayload();
+            $time = $this->validatePayload($postData, $this->isGranted(self::ROLE_ADMIN));
+
+            // Obtener el user: Si el usuario es un admin, podrá enviar el userId en el payload del POST indicando
+            // un usuario distinto a sí mismo, si el usuario no es admin, no pondrá mandar el userId y el usuario
+            // es él mismo. Permitiendo: Admin crear resultados de cualquier usuario y no-admin sólo los suyos.
+            $user = $this->getUserPost($loggedUser, $postData, $this->isGranted(self::ROLE_ADMIN));
+
+            // Crear el resultado
+            $result = new Result(
+                $postData->get(Result::RESULT_ATTR),
+                $user,
+                $time,
+            );
+
+            // Insertar el resultado en la BD
+            $this->entityManager->persist($result);
+            $this->entityManager->flush();
+
+            // Devolver resultado de la acción HTTP
+            return $this->buildPostResponse($result, $format, $request);
+
+        } catch (HttpExceptionInterface $error) {
             return Utils::errorMessage(
-                Response::HTTP_UNAUTHORIZED,
-                self::UNAUTHORIZED,
+                $error->getStatusCode(),
+                $error->getMessage() ?: null,
                 $format
             );
         }
-
-        // Validación del los datos del payload
-        $postData = $request->getPayload();
-        $responseError = $this->validatePostInput($postData, $format);
-        if ($responseError instanceof Response) {
-            return $responseError;
-        }
-
-        $time = new \DateTime($postData->get(Result::TIME_ATTR));
-
-        $user = $this->entityManager
-            ->getRepository(User::class)
-            ->find($loggedUser->getId()); // No hace falta chequear user ya que userLogged ya lo ha sido
-
-        // Crear el resultado
-        $result = new Result(
-            $postData->get(Result::RESULT_ATTR),
-            $user,
-            $time,
-        );
-
-        $this->entityManager->persist($result);
-        $this->entityManager->flush();
-
-        // 201: Created
-        return Utils::apiResponse(
-            Response::HTTP_CREATED,
-            //[ Result::ID_ATTR => $result->getId() ],
-            [ $result ],
-            $format,
-            [
-                'Location' => $request->getScheme() . '://' . $request->getHttpHost() .
-                    ApiResultsQueryInterface::RUTA_API . '/' . $result->getId(),
-            ]
-        );
     }
 
     /**
      * Implementación de la operación PUT - Actualizar el resultado enviado por parámetro en la petición
-     * Esta acción permitirá cambiar los atributos Result y Time, no se podrá cambiar el atributo User, el usuario
-     * administrador podrá cambiar cualquier Result pero el usuario no-administrador sólo podrá cambiar los suyos.
+     * Usuario administrador podrá cambiar cualquier Result pero los no-administrador sólo podrán cambiar los suyos.
+     * El atributo user sólo puede ser modificado por el administrador, los atributos result y time pueden ser
+     * modificador por todos los usuarios.
      * @param Request $request
      * @param int $resultId
      * @return Response
+     * @throws JsonException
      * @see ApiResultsCommandInterface::putAction()
      */
     #[Route(
@@ -177,80 +166,53 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
     public function putAction(Request $request, int $resultId): Response
     {
         $format = Utils::getFormat($request);
+        try {
+            // Obtener usuario logado o HTTP Error 401 (Unauthorized) si no está logado
+            $loggedUser = $this->checkUserAuthenticated('PUT');
 
-        // Obtenemos usuario logado. Null si no está logado
-        $loggedUser = $this->assertAuthenticated('PUT');
-        if (!$loggedUser instanceof User) {
-            // 401: No Authorized
+            // Si no es Administrador, el resultado debe ser propiedad del usuario logado
+            $result = $this->readResult($resultId, $loggedUser);
+
+            $this->validateETag($request, $result);
+
+            // Validación del los datos del payload
+            $postData = $request->getPayload();
+            $time = $this->validatePayload($postData, $this->isGranted(self::ROLE_ADMIN));
+
+            // Actualizar el resultado
+            $result->setTime($time);
+            $result->setResult($postData->get(Result::RESULT_ATTR));
+            // Sólo el administrador podría cambiar el usuario del resultado
+            if ($this->isGranted(self::ROLE_ADMIN)) {
+                $result->setUser($this->getNewUser($result, $postData));
+            }
+
+            // Actualizar el Result en BD
+            $this->entityManager->flush();
+
+            // Devolver resultado de la acción HTTP
+            return $this->buildPutResponse($result, $format);
+
+        } catch (HttpExceptionInterface $e) {
             return Utils::errorMessage(
-                Response::HTTP_UNAUTHORIZED,
-                self::UNAUTHORIZED,
+                $e->getStatusCode(),
+                $e->getMessage() ?: null,
                 $format
             );
         }
-
-        // Si no es Administrador, el resultado debe ser propiedad del usuario logado
-        $criteria = $this->isGranted(self::ROLE_ADMIN)
-            ? ['id' => $resultId]
-            : ['id' => $resultId, 'user' => $loggedUser];
-
-        // Se hace la consulta
-        $result = $this->entityManager
-            ->getRepository(Result::class)
-            ->findOneBy($criteria);
-
-        // No hay resultado (404: Not found)
-        if (!$result instanceof Result) {
-            return Utils::errorMessage(Response::HTTP_NOT_FOUND, null, $format);
-        }
-
-        // Chequear que no haya cambiado el ETag
-        $etag = md5(json_encode($result, JSON_THROW_ON_ERROR));
-        if (!$request->headers->has('If-Match') || $etag != $request->headers->get('If-Match')) {
-            // 412: Precondition failed
-            return Utils::errorMessage(
-                Response::HTTP_PRECONDITION_FAILED,
-                'PRECONDITION FAILED: one or more conditions given evaluated to false',
-                $format
-            );
-        }
-
-        // Validación del los datos del payload
-        $postData = $request->getPayload();
-        $timeOrError = $this->validatePutInput($postData, $format);
-        if ($timeOrError instanceof Response) {
-            return $timeOrError; // Error de validación es enviado
-        }
-
-        // Actualizar el resultado
-        $result->setResult($postData->get(Result::RESULT_ATTR));
-        $result->setTime($timeOrError);
-
-        $this->entityManager->flush();
-
-        // ETag del result después de actualizarse
-        $newEtag = md5(json_encode($result, JSON_THROW_ON_ERROR));
-
-        // 209: Content Returned
-        return Utils::apiResponse(
-            209, [ $result ],
-            $format,
-            [
-                'ETag' => $newEtag,
-                'Cache-Control' => 'private',
-            ]
-        );
     }
 
+    /* Métodos auxiliares usados por las acciones */
+
     /**
-     * Chequea si el usuario está autenticado y saca log
+     * Chequea si el usuario está autenticado y saca log de la acción en curso
      * @param string $action
-     * @return User|null
+     * @return User
      */
-    private function assertAuthenticated(string $action): ?User
+    private function checkUserAuthenticated(string $action): User
     {
         if (!$this->isGranted('IS_AUTHENTICATED_FULLY')) {
-            return null;
+            throw new HttpException(Response::HTTP_UNAUTHORIZED,self::MSG_UNAUTHORIZED);
         }
 
         /** @var User $user */
@@ -266,74 +228,180 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
     }
 
     /**
-     * Chequea si el payload del POST es correcto
+     * Chequeos generales del payload de los métodos PUT y POST
      * @param InputBag $postData
-     * @param string $format
-     * @return Response|null
+     * @param bool $isAdmin
+     * @return DateTime
      */
-    private function validatePostInput(InputBag $postData, string $format): ?Response {
-        // Campos obligatorios
-        if (!$postData->has(Result::RESULT_ATTR) || !$postData->has(Result::TIME_ATTR)) {
-            return Utils::errorMessage(Response::HTTP_UNPROCESSABLE_ENTITY, null, $format);
-        }
+    private function validatePayload(InputBag $postData, bool $isAdmin): DateTime {
 
-        // Campos no permitidos
-        if ($postData->has('user') || $postData->has('id')) {
-            return Utils::errorMessage(Response::HTTP_BAD_REQUEST, null, $format);
-        }
-
-        // result
-        $resultValue = $postData->get(Result::RESULT_ATTR);
-        if (!is_int($resultValue) || $resultValue < 0) {
-            return Utils::errorMessage(Response::HTTP_UNPROCESSABLE_ENTITY, null, $format);
-        }
-
-        // time
-        try {
-            new \DateTime($postData->get(Result::TIME_ATTR));
-        } catch (\Exception) {
-            return Utils::errorMessage(Response::HTTP_UNPROCESSABLE_ENTITY, null, $format);
-        }
-
-        return null;
-    }
-
-    /**
-     * Chequea si el payload del PUT es correcto
-     * @param InputBag $postData
-     * @param string $format
-     * @return DateTime|Response
-     */
-    private function validatePutInput(InputBag $postData, string $format): DateTime|Response {
-
+        // Validar campos obligatorios
         $expectedFields = [
             Result::RESULT_ATTR,
             Result::TIME_ATTR
         ];
-
-        // Campos obligatorios
         foreach ($expectedFields as $field) {
             if (!$postData->has($field)) {
-                return Utils::errorMessage(Response::HTTP_BAD_REQUEST, null, $format);
+                throw new HttpException(Response::HTTP_BAD_REQUEST,self::MSG_MISSING_FIELDS);
             }
         }
 
-        // Campos no permitidos
-        if ($postData->has('user') || $postData->has('id')) {
-            return Utils::errorMessage(Response::HTTP_BAD_REQUEST, null, $format);
+        // Campos no permitidos: Id no puede ser modificado nunca y userid sólo por el Admin
+        if ($postData->has('id') || (!$isAdmin && $postData->get(Result::USERID_ATTR))) {
+            throw new HttpException(Response::HTTP_BAD_REQUEST,self::MSG_NOT_ALLOW);
         }
 
         // Validación result
         $resultValue = $postData->get(Result::RESULT_ATTR);
         if (!is_int($resultValue) || $resultValue < 0) {
-            return Utils::errorMessage(Response::HTTP_UNPROCESSABLE_ENTITY, null, $format);
+            throw new HttpException(Response::HTTP_UNPROCESSABLE_ENTITY,self::MSG_WRONG_RESULT);
         }
 
         // Validación time
         try {
-            return new \DateTime($postData->get(Result::TIME_ATTR));
-        } catch (\Exception) {
-            return Utils::errorMessage(Response::HTTP_UNPROCESSABLE_ENTITY, null, $format);
+            return new DateTime($postData->get(Result::TIME_ATTR));
+        } catch (Exception) {
+            throw new HttpException(Response::HTTP_UNPROCESSABLE_ENTITY,self::MSG_WRONG_TIME);
         }
+    }
+
+    /**
+     * Define el usuario a ser insertado en el result. Si el usuario es un admin, podrá enviar el userId
+     * en el payload del POST indicando un usuario distinto a sí mismo, si el usuario no es admin, no pondrá
+     * enviar userId y el usuario es él mismo.
+     * Permitiendo: Admin crear resultados de cualquier usuario y no-admin sólo sus propios resultados.
+     * @param User $loggedUser
+     * @param InputBag $postData
+     * @param bool $isAdmin
+     * @return User
+     */
+    private function getUserPost(User $loggedUser, InputBag $postData, bool $isAdmin): User {
+
+        // Si el usuario es no-administrador o el payload no contiene un userId, se devuelve el usuario logado.
+        if ((!$isAdmin) || (!$postData->has(Result::USERID_ATTR))) {
+            $user = $this->entityManager
+                ->getRepository(User::class)
+                ->find($loggedUser->getId());
+        } else {
+            // Si el usuario es administrador y el payload contiene un userId, se devuelve el usuario del payload.
+            $user = $this->entityManager
+                ->getRepository(User::class)
+                ->find($postData->get(Result::USERID_ATTR));
+        }
+
+        if (!$user instanceof User) {
+            throw new HttpException(Response::HTTP_UNPROCESSABLE_ENTITY,self::MSG_WRONG_USERID);
+        }
+
+        return $user;
+    }
+
+    /**
+     * Recupera de la BD el result que se pretende actualizar desde PUT o borrar desde DELETE
+     * @param int $resultId
+     * @param User $loggedUser
+     * @return Result
+     */
+    private function readResult(int $resultId, User $loggedUser): Result
+    {
+        $criteria = $this->isGranted(self::ROLE_ADMIN)
+            ? ['id' => $resultId]
+            : ['id' => $resultId, 'user' => $loggedUser];
+
+        $result = $this->entityManager
+            ->getRepository(Result::class)
+            ->findOneBy($criteria);
+
+        if (!$result instanceof Result) {
+            // No hay resultado (404: Not found) - Evita antipatrón 403, no dar más información de la necesaria
+            throw new HttpException(Response::HTTP_NOT_FOUND,self::MSG_NOT_FOUND);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Valida el ETag para comprobar si el recurso al que se le va a aplicar un PUT ha cambiado
+     * @param Request $request
+     * @param Result $result
+     * @return void
+     * @throws JsonException
+     */
+    private function validateETag(Request $request, Result $result): void
+    {
+        $etag = md5(json_encode($result, JSON_THROW_ON_ERROR));
+
+        if (!$request->headers->has('If-Match') || $etag !== $request->headers->get('If-Match')) {
+            throw new HttpException(Response::HTTP_PRECONDITION_FAILED,self::MSG_FAILED_ETAG);
+        }
+    }
+
+    /**
+     * Obtiene el usuario de la petición PUT (Sólo para Admin)
+     * @param Result $result
+     * @param InputBag $postData
+     * @return User
+     */
+    private function getNewUser(Result $result, InputBag $postData): User {
+
+        if ($result->getUser() !== $postData->get(Result::USER_ATTR)) {
+            // Buscar el usuario indicado en la request
+            $user = $this->entityManager
+                ->getRepository(User::class)
+                ->find($postData->get(Result::USERID_ATTR));
+
+            if ($user instanceof User) {
+                return $user;
+            } else {
+                throw new HttpException(Response::HTTP_UNPROCESSABLE_ENTITY,self::MSG_WRONG_USERID);
+            }
+        } else {
+            return $result->getUser();
+        }
+    }
+
+    /**
+     * Crea la respuesta de la operación PUT, enviando un 209 y el nuevo ETag.
+     * @param Result $result
+     * @param string $format
+     * @return Response
+     * @throws JsonException
+     */
+    private function buildPutResponse(Result $result, string $format): Response
+    {
+        // ETag del result después de actualizarse
+        $etag = md5(json_encode($result, JSON_THROW_ON_ERROR));
+
+        // 209: Content Returned
+        return Utils::apiResponse(
+            209,
+            [ $result ],
+            $format,
+            [
+                'ETag' => $etag,
+                'Cache-Control' => 'private',
+            ]
+        );
+    }
+
+    /**
+     * Crea la respuesta de la operación POST, enviando un 201 y el result creado.
+     * @param Result $result
+     * @param string $format
+     * @param Request $request
+     * @return Response
+     */
+    private function buildPostResponse(Result $result, string $format, Request $request): Response
+    {
+        // 201: Created
+        return Utils::apiResponse(
+            Response::HTTP_CREATED,
+            [ $result ],
+            $format,
+            [
+                'Location' => $request->getScheme() . '://' . $request->getHttpHost() .
+                                        ApiResultsQueryInterface::RUTA_API . '/' . $result->getId()
+            ]
+        );
     }
 }
