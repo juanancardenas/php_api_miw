@@ -233,6 +233,8 @@ paths:
           $ref: '#/components/responses/404_Resource_Not_Found_Response'
         '412':
           $ref: '#/components/responses/412_Precondition_Failed_Response'
+        '422':
+          $ref: '#/components/responses/422_UnprocessableEntity_Response'
     delete:
       tags: [ '👥 Users' ]
       summary: Removes the User resource.
