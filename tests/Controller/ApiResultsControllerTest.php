@@ -21,6 +21,26 @@ class ApiResultsControllerTest extends BaseTestCase
     /** @var array<string,string> $adminHeaders */
     protected static array $adminHeaders;
 
+    /** @var array<string,string> $userHeaders */
+    protected static array $userHeaders;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Generar token para admin
+        self::$adminHeaders = $this->getTokenHeaders(
+            self::$role_admin[User::EMAIL_ATTR],
+            self::$role_admin[User::PASSWD_ATTR]
+        );
+
+        // Generar token para usuario
+        self::$userHeaders = $this->getTokenHeaders(
+            self::$role_user[User::EMAIL_ATTR],
+            self::$role_user[User::PASSWD_ATTR]
+        );
+    }
+
     /**
      * Test OPTIONS /results y /results/{resultId} 204 No Content
      * @return void
@@ -64,17 +84,12 @@ class ApiResultsControllerTest extends BaseTestCase
             Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
         ];
 
-        self::$adminHeaders = $this->getTokenHeaders(
-            self::$role_user[User::EMAIL_ATTR],
-            self::$role_user[User::PASSWD_ATTR]
-        );
-
         self::$client->request(
             Request::METHOD_POST,
             self::RUTA_API,
             [],
             [],
-            self::$adminHeaders,
+            self::$userHeaders,
             json_encode($p_data)
         );
 
@@ -252,12 +267,6 @@ class ApiResultsControllerTest extends BaseTestCase
     #[Depends('testGetResultAction200Ok')]
     public function testHeadResultsAction200Ok(): void
     {
-        // Autenticación válida
-        self::$adminHeaders = $this->getTokenHeaders(
-            self::$role_user[User::EMAIL_ATTR],
-            self::$role_user[User::PASSWD_ATTR]
-        );
-
         self::$client->request(
             Request::METHOD_HEAD,
             self::RUTA_API,
@@ -298,12 +307,7 @@ class ApiResultsControllerTest extends BaseTestCase
     #[Depends('testGetResultAction200Ok')]
     public function testHeadResultsAction404NotFound(): void
     {
-        // Simulamos 404 forzando un endpoint que no exista
-        self::$adminHeaders = $this->getTokenHeaders(
-            self::$role_user[User::EMAIL_ATTR],
-            self::$role_user[User::PASSWD_ATTR]
-        );
-
+        // Simular 404 forzando un endpoint que no exista
         self::$client->request(
             Request::METHOD_HEAD,
             self::RUTA_API . '/999999', // ID que no existe
@@ -479,6 +483,65 @@ class ApiResultsControllerTest extends BaseTestCase
         return $result;
     }
 
+//TODO
+//    /**
+//     * Test POST /results 201
+//     * El usuario Admin crea un Result al otro usuario
+//     * @return array<string,string> result data
+//     */
+//    //#[Depends('testPostResultAction201Created')]
+//    public function testPostResultAction201AdminToUser(): array
+//    {
+//        $p_data = [
+//            Result::RESULT_ATTR => self::$faker->numberBetween(0, 10000),
+//            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+//            'userid' => 2     // Id del usuario no admin
+//        ];
+//
+//        self::$client->request(
+//            Request::METHOD_POST,
+//            self::RUTA_API,
+//            [],
+//            [],
+//            self::$adminHeaders,
+//            json_encode($p_data)
+//        );
+//
+//        $response = self::$client->getResponse();
+//
+//        // Status
+//        self::assertSame(Response::HTTP_CREATED, $response->getStatusCode());
+//        self::assertTrue($response->isSuccessful());
+//
+//        // Headers
+//        self::assertNotNull($response->headers->get('Location'));
+//        self::assertJson($response->getContent());
+//
+//        // Body
+//        $data = json_decode($response->getContent(), true);
+//        self::assertIsArray($data);
+//        self::assertCount(1, $data);
+//
+//        $result = $data[0];
+//        self::assertArrayHasKey(Result::ID_ATTR, $result);
+//        self::assertArrayHasKey(Result::RESULT_ATTR, $result);
+//        self::assertArrayHasKey(Result::TIME_ATTR, $result);
+//        self::assertArrayHasKey(Result::USER_ATTR, $result);
+//
+//        self::assertSame(
+//            $p_data[Result::RESULT_ATTR],
+//            $result[Result::RESULT_ATTR]
+//        );
+//
+//        // El usuario es el no admin
+//        self::assertSame(
+//            self::$role_user[User::EMAIL_ATTR],
+//            $result['user']['email']
+//        );
+//
+//        return $result;
+//    }
+
     /** TEST PUT **/
 
     /**
@@ -518,7 +581,7 @@ class ApiResultsControllerTest extends BaseTestCase
             Request::METHOD_PUT,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
             [], [],
-            array_merge(self::$adminHeaders, ['HTTP_If-Match' => $etag]),
+            array_merge(self::$userHeaders, ['HTTP_If-Match' => $etag]),
             json_encode($p_data)
         );
 
@@ -667,6 +730,33 @@ class ApiResultsControllerTest extends BaseTestCase
 
         return intval($result[Result::RESULT_ATTR]);
     }
+
+//TODO
+//    /**
+//     * Test POST /results 201
+//     * El usuario Admin crea un Result al otro usuario
+//     * @param array $result
+//     * @return void result data
+//     */
+//    #[Depends('testPostResultAction201AdminToUser')]
+//    public function testDeleteResultAction403(array $result): void
+//    {
+//        self::$userHeaders = $this->getTokenHeaders(
+//            self::$role_user[User::EMAIL_ATTR],
+//            self::$role_user[User::PASSWD_ATTR]
+//        );
+//
+//        self::$client->request(
+//            Request::METHOD_DELETE,
+//            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+//            [],
+//            [],
+//            self::$userHeaders
+//        );
+//        $response = self::$client->getResponse();
+//        dump($response->getContent());
+//
+//    }
 
     /**
      * Test GET /results/{resultId} 404 NOT FOUND
