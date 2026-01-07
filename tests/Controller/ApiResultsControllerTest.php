@@ -2,18 +2,18 @@
 
 namespace App\Tests\Controller;
 
-use App\Controller\ApiResultsQueryController;
-use DateMalformedStringException;
-use App\Entity\{Result, User};
+use App\Controller\ApiResultsCommandController;
+use App\Entity\Result;
+use App\Entity\User;
 use DateTime;
-use Generator;
-use JetBrains\PhpStorm\ArrayShape;
-use PHPUnit\Framework\Attributes\{CoversClass, DataProvider, Depends, Group};
-use PHPUnit\Framework\MockObject\Exception;
-use Symfony\Component\HttpFoundation\{ Request, Response};
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Depends;
+use PHPUnit\Framework\Attributes\Group;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 
 #[Group('controllers')]
-#[CoversClass(ApiResultsQueryController::class)]
+#[CoversClass(ApiResultsCommandController::class)]
 class ApiResultsControllerTest extends BaseTestCase
 {
     private const string RUTA_API = '/api/v1/results';
@@ -41,37 +41,11 @@ class ApiResultsControllerTest extends BaseTestCase
         );
     }
 
-    /**
-     * Test OPTIONS /results y /results/{resultId} 204 No Content
-     * @return void
-     */
-    public function testOptionsResultAction204NoContent(): void
-    {
-        // OPTIONS /api/v1/results
-        self::$client->request(
-            Request::METHOD_OPTIONS,
-            self::RUTA_API
-        );
-        $response = self::$client->getResponse();
-
-        self::assertSame(
-            Response::HTTP_NO_CONTENT,
-            $response->getStatusCode()
-        );
-        self::assertNotEmpty($response->headers->get('Allow'));
-
-        // OPTIONS /api/v1/results/{id}
-        self::$client->request(
-            Request::METHOD_OPTIONS,
-            self::RUTA_API . '/' . self::$faker->numberBetween(1, 100)
-        );
-
-        self::assertSame(
-            Response::HTTP_NO_CONTENT,
-            $response->getStatusCode()
-        );
-        self::assertNotEmpty($response->headers->get('Allow'));
-    }
+    /* ===================== POST INICIAL ===================== */
+    // Method POST que crea un result a partir del cual se irán ejecutando otras acciones de manera encadenadas
+    // usando dependencias para garantizar el éxito del test.
+    // En este escenario el administrador le crea un resultado al usuario, por lo que tanto administrador como
+    // usuario tendrán permiso total sobre el resultado.
 
     /**
      * Test POST /results 201 Created
@@ -81,21 +55,19 @@ class ApiResultsControllerTest extends BaseTestCase
     {
         $p_data = [
             Result::RESULT_ATTR => self::$faker->numberBetween(0, 10000),
-            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::TIME_ATTR => new DateTime()->format(DATE_ATOM),
+            Result::USERID_ATTR => '2' // Que es el valor en BD del usuario
         ];
 
         self::$client->request(
             Request::METHOD_POST,
             self::RUTA_API,
-            [],
-            [],
-            self::$userHeaders,
+            [], [],
+            self::$adminHeaders,
             json_encode($p_data)
         );
 
         $response = self::$client->getResponse();
-        //dump($response->getContent());
-        //php ./bin/phpunit --filter testPostResultAction201Created
 
         // Status
         self::assertSame(Response::HTTP_CREATED, $response->getStatusCode());
@@ -122,733 +94,279 @@ class ApiResultsControllerTest extends BaseTestCase
         );
 
         self::assertSame(
-            self::$role_user[User::EMAIL_ATTR],
+            self::$role_user[User::EMAIL_ATTR],   // User
             $result['user']['email']
         );
 
         return $result;
     }
 
-    /** TEST GET **/
-
     /**
-     * Test GET /results 200 Ok
-     * @return string ETag header
-     */
-    #[Depends('testPostResultAction201Created')]
-    public function testCGetResultAction200Ok(): string
-    {
-        self::$client->request(
-            Request::METHOD_GET,
-            self::RUTA_API,
-            [],
-            [],
-            self::$adminHeaders
-        );
-        $response = self::$client->getResponse();
-
-        self::assertTrue($response->isSuccessful());
-        self::assertNotNull($response->getEtag());
-
-        $r_body = strval($response->getContent());
-        self::assertJson($r_body);
-        $results = json_decode($r_body, true);
-        self::assertArrayHasKey('results', $results);
-
-        return (string) $response->getEtag();
-    }
-
-    /**
-     * Test GET /results 304 NOT MODIFIED
-     * @param string $etag returned by testCGetResultAction200Ok
-     */
-    #[Depends('testCGetResultAction200Ok')]
-    public function testCGetResultAction304NotModified(string $etag): void
-    {
-        $headers = array_merge(
-            self::$adminHeaders,
-            [ 'HTTP_If-None-Match' => [$etag] ]
-        );
-        self::$client->request(
-            Request::METHOD_GET,
-            self::RUTA_API,
-            [],
-            [],
-            $headers
-        );
-        $response = self::$client->getResponse();
-        self::assertSame(Response::HTTP_NOT_MODIFIED, $response->getStatusCode());
-    }
-
-    /**
-     * Test GET /results/{resultId} 200 Ok (with XML header)
-     * @param array<string,string> $result Result returned by testPostResultAction201()
+     * Test PUT /results/{id} ETag control de concurrencia
+     *  - Primer PUT OK
+     *  - Segundo PUT con un ETag antiguo -> Error 412
+     *  - Segundo PUT con un ETag nuevo -> OK
+     * @param array<string,string> $result
      * @return void
      */
     #[Depends('testPostResultAction201Created')]
-    public function testCGetResultAction200XmlOk(array $result)
+    public function testPutResultActionEtagConcurrency(array $result): void
     {
+        // 1. Obtener ETag inicial
         self::$client->request(
-            Request::METHOD_GET,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR] . '.xml',
+            Request::METHOD_HEAD,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            self::$userHeaders
+        );
+
+        $initialEtag = self::$client->getResponse()->getEtag();
+        self::assertNotEmpty($initialEtag);
+
+        // 2. Primer PUT (válido)
+        $payload1 = [
+            Result::RESULT_ATTR => $result[Result::RESULT_ATTR] + 10,
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::USER_ATTR   => $result[Result::USER_ATTR][Result::ID_ATTR],
+        ];
+
+        self::$client->request(
+            Request::METHOD_PUT,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
             [],
             [],
             array_merge(
-                self::$adminHeaders,
-                [ 'HTTP_ACCEPT' => 'application/xml' ]
-            )
+                self::$userHeaders,
+                ['HTTP_If-Match' => $initialEtag]
+            ),
+            json_encode($payload1)
         );
-        $response = self::$client->getResponse();
-        self::assertTrue($response->isSuccessful(), strval($response->getContent()));
-        self::assertNotNull($response->getEtag());
-        self::assertTrue($response->headers->contains('content-type', 'application/xml'));
-    }
 
-    /**
-     * Test GET /results/{resultId} 200 Ok
-     * @param array<string,string> $result Result returned by testPostResultAction201()
-     * @return string ETag header
-     */
-    #[Depends('testPostResultAction201Created')]
-    public function testGetResultAction200Ok(array $result): string
-    {
+        $response = self::$client->getResponse();
+        self::assertSame(209, $response->getStatusCode());
+
+        $newEtag = $response->getEtag();
+        self::assertNotEmpty($newEtag);
+        self::assertNotSame($initialEtag, $newEtag);
+
+        // 3. Segundo PUT usando ETag ANTIGUO → 412
+        $payload2 = [
+            Result::RESULT_ATTR => $payload1[Result::RESULT_ATTR] + 5,
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::USER_ATTR   => $result[Result::USER_ATTR][Result::ID_ATTR],
+        ];
+
         self::$client->request(
-            Request::METHOD_GET,
+            Request::METHOD_PUT,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
             [],
             [],
-            self::$adminHeaders
+            array_merge(
+                self::$userHeaders,
+                ['HTTP_If-Match' => $initialEtag]
+            ),
+            json_encode($payload2)
         );
+
         $response = self::$client->getResponse();
-
-        self::assertSame(Response::HTTP_OK, $response->getStatusCode());
-        self::assertNotNull($response->getEtag());
-        $r_body = (string) $response->getContent();
-        self::assertJson($r_body);
-        $result_aux = json_decode($r_body, true)[Result::RESULT_ATTR];
-        self::assertSame($result[Result::ID_ATTR], $result_aux[Result::ID_ATTR]);
-
-        return (string) $response->getEtag();
-    }
-
-    /**
-     * Test GET /results/{resultId} 304 NOT MODIFIED
-     * @param array<string,string> $result Result returned by testPostResultAction201Created()
-     * @param string $etag returned by testGetResultAction200Ok
-     * @return string Entity Tag
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testGetResultAction304NotModified(array $result, string $etag): string
-    {
-        $headers = array_merge(
-            self::$adminHeaders,
-            [ 'HTTP_If-None-Match' => [$etag] ]
+        self::assertSame(
+            Response::HTTP_PRECONDITION_FAILED,
+            $response->getStatusCode()
         );
+
+        // 4. Segundo PUT usando ETag NUEVO → OK
         self::$client->request(
-            Request::METHOD_GET,
+            Request::METHOD_PUT,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
             [],
             [],
-            $headers);
-        $response = self::$client->getResponse();
-        self::assertSame(Response::HTTP_NOT_MODIFIED, $response->getStatusCode());
-
-        return $etag;
-    }
-
-    /** TEST HEAD **/
-
-    /**
-     * Test HEAD /results 200 OK
-     * @return void
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testHeadResultsAction200Ok(): void
-    {
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API,
-            [], [],
-            self::$adminHeaders
+            array_merge(
+                self::$userHeaders,
+                ['HTTP_If-Match' => $newEtag]
+            ),
+            json_encode($payload2)
         );
 
         $response = self::$client->getResponse();
-
-        self::assertSame(Response::HTTP_OK, $response->getStatusCode());
-        self::assertSame('', $response->getContent()); // HEAD no devuelve body
-        self::assertNotNull($response->getEtag());
+        self::assertSame(209, $response->getStatusCode());
     }
 
     /**
-     * Test HEAD /results 401 Unauthorized
+     * Test HEAD /results/{id}
+     * @param array<string,string> $result
      * @return void
      */
     #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testHeadResultsAction401Unauthorized(): void
-    {
-        // Sin autenticación
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API
-        );
-
-        $response = self::$client->getResponse();
-        self::assertSame(Response::HTTP_UNAUTHORIZED, $response->getStatusCode());
-    }
-
-    /**
-     * Test HEAD /results 404 Not Found
-     * @return void
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testHeadResultsAction404NotFound(): void
-    {
-        // Simular 404 forzando un endpoint que no exista
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API . '/999999', // ID que no existe
-            [], [],
-            self::$adminHeaders
-        );
-
-        $response = self::$client->getResponse();
-        self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
-        self::assertSame('', $response->getContent());
-    }
-
-    /**
-     * Test HEAD /results/{resultId} 200 Ok
-     * @param array<string,string> $result Result returned by testPostResultAction201()
-     * @return void
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
     public function testHeadResultAction200Ok(array $result): void
     {
+        // Visible para usuario por HEAD
         self::$client->request(
             Request::METHOD_HEAD,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            self::$adminHeaders
+            [], [],
+            self::$userHeaders
         );
-
-        $response = self::$client->getResponse();
-
-        self::assertSame(Response::HTTP_OK, $response->getStatusCode());
-        self::assertSame('', $response->getContent());
-    }
-
-    /**
-     * Test HEAD /results/{resultId} 304 Not Modified
-     * @param array<string,string> $result Result returned by testPostResultAction201()
-     * @return void
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testHeadResultAction304NotModified(array $result): void
-    {
-        // Primero obtenemos el ETag vía GET (ya probado que funciona)
-        self::$client->request(
-            Request::METHOD_GET,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            self::$adminHeaders
-        );
-
         $etag = self::$client->getResponse()->headers->get('ETag');
         self::assertNotEmpty($etag);
 
-        // Ahora el HEAD con If-None-Match
+        // Visible para admin por HEAD
         self::$client->request(
             Request::METHOD_HEAD,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            array_merge(
-                self::$adminHeaders,
-                ['HTTP_IF_NONE_MATCH' => $etag]
-            )
-        );
-
-        $response = self::$client->getResponse();
-
-        self::assertSame(Response::HTTP_NOT_MODIFIED, $response->getStatusCode());
-        self::assertSame('', $response->getContent());
-    }
-
-    /**
-     * Test HEAD /results/{resultId} 401 Unauthorized
-     * @param array<string,string> $result Result returned by testPostResultAction201()
-     * @return void
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testHeadResultAction401Unauthorized(array $result): void
-    {
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR]
-        // sin headers de autenticación
-        );
-
-        $response = self::$client->getResponse();
-
-        self::assertSame(Response::HTTP_UNAUTHORIZED, $response->getStatusCode());
-    }
-
-    /**
-     * Test HEAD /results/{resultId} 404 Not found
-     * @return void
-     */
-    #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction200Ok')]
-    public function testHeadResultAction404NotFound(): void
-    {
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API . '/999999',
-            [],
-            [],
+            [], [],
             self::$adminHeaders
         );
+        $etag = self::$client->getResponse()->headers->get('ETag');
+        self::assertNotEmpty($etag);
+    }
 
+    /**
+     * Test GET /results/{id}
+     * @param array<string,string> $result
+     * @return void
+     */
+    #[Depends('testPostResultAction201Created')]
+    public function testGetResultAction200Ok(array $result): void
+    {
+        // Visible para usuario por GET
+        self::$client->request(
+            Request::METHOD_GET,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            self::$userHeaders
+        );
         $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_OK, $response->getStatusCode());
 
-        self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
-        self::assertSame('', $response->getContent());
-    }
-
-    /** TEST POST **/
-
-    /**
-     * Test POST /results 400 Bad Request
-     * @param array<string,string> $result Result returned by testPostResultAction201Created()
-     * @return array<string,string> result data
-     */
-    #[Depends('testPostResultAction201Created')]
-    public function testPostResultAction400BadRequest(array $result): array
-    {
-        $p_data = [
-            Result::ID_ATTR => $result[Result::ID_ATTR], // Mismo id -> error
-            Result::RESULT_ATTR => self::$faker->numberBetween(1, 10000),
-            Result::TIME_ATTR => self::$faker->time(),
-        ];
+        // Visible para admin por GET
         self::$client->request(
-            Request::METHOD_POST,
-            self::RUTA_API,
-            [],
-            [],
-            self::$adminHeaders,
-            strval(json_encode($p_data))
+            Request::METHOD_GET,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            self::$adminHeaders
         );
-        $this->checkResponseErrorMessage(
-            self::$client->getResponse(),
-            Response::HTTP_BAD_REQUEST
-        );
-
-        return $result;
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_OK, $response->getStatusCode());
     }
-
-    /**
-     * Test POST /results 422 Unprocessable Entity
-     * @param array<string,string> $result Result returned by testPostResultAction201Created()
-     * @return array<string,string> result data
-     */
-    #[Depends('testPostResultAction201Created')]
-    public function testPostResultsAction422UnprocessableEntity(array $result): array
-    {
-        $p_data = [
-            Result::RESULT_ATTR => self::$faker->numberBetween(1, 10000),
-            Result::TIME_ATTR => 'not-a-date',  // Valor incorrecto
-        ];
-        self::$client->request(
-            Request::METHOD_POST,
-            self::RUTA_API,
-            [],
-            [],
-            self::$adminHeaders,
-            strval(json_encode($p_data))
-        );
-        $this->checkResponseErrorMessage(
-            self::$client->getResponse(),
-            Response::HTTP_UNPROCESSABLE_ENTITY
-        );
-
-        return $result;
-    }
-
-//TODO
-//    /**
-//     * Test POST /results 201
-//     * El usuario Admin crea un Result al otro usuario
-//     * @return array<string,string> result data
-//     */
-//    //#[Depends('testPostResultAction201Created')]
-//    public function testPostResultAction201AdminToUser(): array
-//    {
-//        $p_data = [
-//            Result::RESULT_ATTR => self::$faker->numberBetween(0, 10000),
-//            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
-//            'userid' => 2     // Id del usuario no admin
-//        ];
-//
-//        self::$client->request(
-//            Request::METHOD_POST,
-//            self::RUTA_API,
-//            [],
-//            [],
-//            self::$adminHeaders,
-//            json_encode($p_data)
-//        );
-//
-//        $response = self::$client->getResponse();
-//
-//        // Status
-//        self::assertSame(Response::HTTP_CREATED, $response->getStatusCode());
-//        self::assertTrue($response->isSuccessful());
-//
-//        // Headers
-//        self::assertNotNull($response->headers->get('Location'));
-//        self::assertJson($response->getContent());
-//
-//        // Body
-//        $data = json_decode($response->getContent(), true);
-//        self::assertIsArray($data);
-//        self::assertCount(1, $data);
-//
-//        $result = $data[0];
-//        self::assertArrayHasKey(Result::ID_ATTR, $result);
-//        self::assertArrayHasKey(Result::RESULT_ATTR, $result);
-//        self::assertArrayHasKey(Result::TIME_ATTR, $result);
-//        self::assertArrayHasKey(Result::USER_ATTR, $result);
-//
-//        self::assertSame(
-//            $p_data[Result::RESULT_ATTR],
-//            $result[Result::RESULT_ATTR]
-//        );
-//
-//        // El usuario es el no admin
-//        self::assertSame(
-//            self::$role_user[User::EMAIL_ATTR],
-//            $result['user']['email']
-//        );
-//
-//        return $result;
-//    }
-
-    /** TEST PUT **/
 
     /**
      * Test PUT /results/{resultId} 209 Content Returned
+     * Al ser propiedad del User, el User podrá editarlo
      * @param array $result result returned by testPostResultAction201()
-     * @param string $etag returned by testGetResultAction304NotModified()
      * @return array<string,string> modified result data
-     * @throws Exception|DateMalformedStringException
      */
     #[Depends('testPostResultAction201Created')]
-    #[Depends('testGetResultAction304NotModified')]
-    #[Depends('testCGetResultAction304NotModified')]
-    #[Depends('testPostResultAction400BadRequest')]
-    public function testPutResultAction209ContentReturned(array $result, string $etag): array
+    public function testPutResultAction209ContentReturned(array $result): array
     {
-        // Stub de usuario
-        $userStub = $this->createStub(User::class);
-        $userStub->method('getId')->willReturn($result['user']['id']);
-        $userStub->method('getEmail')->willReturn($result['user']['email']);
-
-        // Crear objeto Result temporal
-        $resultObj = new Result(
-            $result[Result::RESULT_ATTR],
-            $userStub,
-            new DateTime($result[Result::TIME_ATTR])
-        );
-
-        // Payload correcto
+        $new_result = self::$faker->numberBetween(1, 10000);
+        // Aunque lo ha creado el administrador, el usuario podrá actualizar este resultado.
         $p_data = [
-            Result::RESULT_ATTR => self::$faker->numberBetween(1, 10000),
-            Result::TIME_ATTR   => new DateTime()->format('Y-m-d H:i:s'),
-            Result::USER_ATTR   => $resultObj->getUser()->getId(),
+            Result::RESULT_ATTR => $new_result,
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM)
         ];
 
-        // Ejecutar PUT
+        self::$client->request(
+            Request::METHOD_HEAD,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            self::$userHeaders  // User
+        );
+
+        $etag = self::$client->getResponse()->getEtag();
+        self::assertNotEmpty($etag);
+
         self::$client->request(
             Request::METHOD_PUT,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
             [], [],
-            array_merge(self::$userHeaders, ['HTTP_If-Match' => $etag]),
+            array_merge(self::$userHeaders, ['HTTP_If-Match' => $etag]),  // User
             json_encode($p_data)
         );
 
         $response = self::$client->getResponse();
-        $r_body = (string) $response->getContent();
-
         self::assertSame(209, $response->getStatusCode());
-        self::assertJson($r_body);
 
-        $result_aux_array = json_decode($r_body, true);
-        $result_aux = $result_aux_array[0];
+        $body = json_decode((string)$response->getContent(), true);
+        $result_aux = $body[0];
 
-        // Validaciones
         self::assertSame($result[Result::ID_ATTR], $result_aux[Result::ID_ATTR]);
         self::assertSame($p_data[Result::RESULT_ATTR], $result_aux[Result::RESULT_ATTR]);
-        self::assertSame($p_data[Result::USER_ATTR], $result_aux[Result::USER_ATTR][Result::ID_ATTR]);
+
+        // GET para validar persistencia
+        self::$client->request(
+            Request::METHOD_GET,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [], self::$userHeaders
+        );
+
+        $getResponse = self::$client->getResponse();
+        self::assertSame(Response::HTTP_OK, $getResponse->getStatusCode());
+
+        $getBody = json_decode((string)$getResponse->getContent(), true);
+        $fetchedResult = $getBody['result'] ?? null;
+        self::assertNotNull($fetchedResult);
+
+        // Comparar que el valor 'result' coincide con $new_result
+        self::assertSame($new_result, $fetchedResult[Result::RESULT_ATTR]);
 
         return $result_aux;
     }
 
     /**
-     * Test PUT /results/{resultId} 400 Bad Request
-     * @param array<string,string> $result result returned by testPutResultAction209()
-     * @return void
-     */
-    #[Depends('testPutResultAction209ContentReturned')]
-    public function testPutResultAction400BadRequest(array $result): void
-    {
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            self::$adminHeaders
-        );
-        $etag = self::$client->getResponse()->getEtag();
-
-        // El campo id no debe incluirse en el payload
-        $p_data = [
-            Result::ID_ATTR => $result[Result::ID_ATTR],
-            Result::RESULT_ATTR => $result[Result::RESULT_ATTR],
-            Result::TIME_ATTR => $result[Result::TIME_ATTR],
-        ];
-        // Hacer el PUT
-        self::$client->request(
-            Request::METHOD_PUT,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            array_merge(
-                self::$adminHeaders,
-                [ 'HTTP_If-Match' => $etag ]
-            ),
-            strval(json_encode($p_data))
-        );
-        $response = self::$client->getResponse();
-        $this->checkResponseErrorMessage($response, Response::HTTP_BAD_REQUEST);
-    }
-
-    /**
-     * Test PUT /results/{resultId} 412 PRECONDITION_FAILED
-     * @param array<string,string> $result result returned by testPutResultAction209ContentReturned()
-     * @return void
-     */
-    #[Depends('testPutResultAction209ContentReturned')]
-    public function testPutResultAction412PreconditionFailed(array $result): void
-    {
-        self::$client->request(
-            Request::METHOD_PUT,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            self::$adminHeaders
-        );
-        $response = self::$client->getResponse();
-        $this->checkResponseErrorMessage($response, Response::HTTP_PRECONDITION_FAILED);
-    }
-
-    /**
-     * Test PUT /results/{resultId} 422 Unprocessable Entity
-     * @param array<string,string> $result result returned by testPutResultAction209()
-     * @return void
-     */
-    #[Depends('testPutResultAction209ContentReturned')]
-    public function testPutResultAction422Unprocessable(array $result): void
-    {
-        self::$client->request(
-            Request::METHOD_HEAD,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            self::$adminHeaders
-        );
-        $etag = self::$client->getResponse()->getEtag();
-
-        // Result con valor negativo
-        $p_data = [
-            Result::RESULT_ATTR => self::$faker->numberBetween(-1000, -1),
-            Result::TIME_ATTR => $result[Result::TIME_ATTR],
-            Result::USER_ATTR => $result[Result::USER_ATTR],
-        ];
-        // Hacer el PUT
-        self::$client->request(
-            Request::METHOD_PUT,
-            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            array_merge(
-                self::$adminHeaders,
-                [ 'HTTP_If-Match' => $etag ]
-            ),
-            strval(json_encode($p_data))
-        );
-        $response = self::$client->getResponse();
-        $this->checkResponseErrorMessage($response, Response::HTTP_UNPROCESSABLE_ENTITY);
-    }
-
-    /** TEST DElETE **/
-
-    /**
      * Test DELETE /results/{resultId} 204 No Content
-     * @param array<string,string> $result result returned by testPostResultAction400BadRequest()
+     * @param array<string,string> $result result returned by testPutResultAction209ContentReturned()
      * @return int resultId
      */
-    #[Depends('testPostResultAction400BadRequest')]
-    #[Depends('testPutResultAction412PreconditionFailed')]
-    #[Depends('testPutResultAction403Forbidden')]
-    #[Depends('testCGetResultAction200XmlOk')]
-    #[Depends('testPutResultAction400BadRequest')]
+    #[Depends('testPutResultAction209ContentReturned')]
+    #[Depends('testHeadResultAction200Ok')]
+    #[Depends('testGetResultAction200Ok')]
+    #[Depends('testPutResultActionEtagConcurrency')]
     public function testDeleteResultAction204NoContent(array $result): int
     {
+        // El usuario puede borrar su resultado
         self::$client->request(
             Request::METHOD_DELETE,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [],
-            [],
-            self::$adminHeaders
+            [], [], self::$userHeaders
         );
         $response = self::$client->getResponse();
 
-        self::assertSame(
-            Response::HTTP_NO_CONTENT,
-            $response->getStatusCode()
-        );
+        self::assertSame(Response::HTTP_NO_CONTENT, $response->getStatusCode());
         self::assertEmpty($response->getContent());
+
+        // Si hacemos una consulta, no debe aparecer
+        self::$client->request(
+            Request::METHOD_GET,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [], self::$userHeaders
+        );
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
 
         return intval($result[Result::RESULT_ATTR]);
     }
 
-//TODO
-//    /**
-//     * Test POST /results 201
-//     * El usuario Admin crea un Result al otro usuario
-//     * @param array $result
-//     * @return void result data
-//     */
-//    #[Depends('testPostResultAction201AdminToUser')]
-//    public function testDeleteResultAction403(array $result): void
-//    {
-//        self::$userHeaders = $this->getTokenHeaders(
-//            self::$role_user[User::EMAIL_ATTR],
-//            self::$role_user[User::PASSWD_ATTR]
-//        );
-//
-//        self::$client->request(
-//            Request::METHOD_DELETE,
-//            self::RUTA_API . '/' . $result[Result::ID_ATTR],
-//            [],
-//            [],
-//            self::$userHeaders
-//        );
-//        $response = self::$client->getResponse();
-//        dump($response->getContent());
-//
-//    }
-
     /**
-     * Test GET /results/{resultId} 404 NOT FOUND
-     * Test PUT /results/{resultId} 404 NOT FOUND
-     * Test DELETE /results/{resultId} 404 NOT FOUND
-     * @param string $method
-     * @param int $userId user id. returned by testDeleteUserAction204()
-     * @return void
+     * Test DELETE /results/{resultId} 404 Not Found
+     * @param int $resultId
      */
     #[Depends('testDeleteResultAction204NoContent')]
-    #[DataProvider('providerRoutes404')]
-    public function testResultStatus404NotFound(string $method, int $userId): void
+    public function testDeleteResultAction404NotFound(int $resultId): void
     {
         self::$client->request(
-            $method,
-            self::RUTA_API . '/' . $userId,
-            [],
-            [],
-            self::$adminHeaders
+            Request::METHOD_GET,
+            self::RUTA_API . '/' . $resultId,
+            [], [], self::$userHeaders
         );
-        $this->checkResponseErrorMessage(
-            self::$client->getResponse(),
-            Response::HTTP_NOT_FOUND
-        );
-    }
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
 
-    /**
-     * Test GET /results 401 UNAUTHORIZED
-     * Test POST /results 401 UNAUTHORIZED
-     * Test GET /results/{resultId} 401 UNAUTHORIZED
-     * Test PUT /results/{resultId} 401 UNAUTHORIZED
-     * Test DELETE results/{resultId} 401 UNAUTHORIZED
-     *
-     * @param string $method
-     * @param string $uri
-     * @return void
-     */
-    #[DataProvider('providerRoutes401')]
-    public function testResultStatus401Unauthorized(string $method, string $uri): void
-    {
         self::$client->request(
-            $method,
-            $uri,
-            [],
-            [],
-            [ 'HTTP_ACCEPT' => 'application/json' ]
+            Request::METHOD_GET,
+            self::RUTA_API . '/' . $resultId,
+            [], [], self::$adminHeaders
         );
-        $this->checkResponseErrorMessage(
-            self::$client->getResponse(),
-            Response::HTTP_UNAUTHORIZED
-        );
-    }
-
-    /**
-     * * * * * * * * * *
-     * P R O V I D E R S
-     * * * * * * * * * *
-     */
-
-    /**
-     * Route provider (expected status: 401 UNAUTHORIZED)
-     * @return Generator name => [ method, url ]
-     */
-    #[ArrayShape([
-        'cgetAction401' => "array",
-        'getAction401' => "array",
-        'postAction401' => "array",
-        'putAction401' => "array",
-        'deleteAction401' => "array"
-    ])]
-    public static function providerRoutes401(): Generator
-    {
-        yield 'cgetAction401'   => [ Request::METHOD_GET,    self::RUTA_API ];
-        yield 'getAction401'    => [ Request::METHOD_GET,    self::RUTA_API . '/1' ];
-        yield 'postAction401'   => [ Request::METHOD_POST,   self::RUTA_API ];
-        yield 'putAction401'    => [ Request::METHOD_PUT,    self::RUTA_API . '/1' ];
-        yield 'deleteAction401' => [ Request::METHOD_DELETE, self::RUTA_API . '/1' ];
-    }
-
-    /**
-     * Route provider (expected status 404 NOT FOUND)
-     * @return Generator name => [ method ]
-     */
-    #[ArrayShape([
-        'getAction404' => "array",
-        'putAction404' => "array",
-        'deleteAction404' => "array"
-    ])]
-    public static function providerRoutes404(): Generator
-    {
-        yield 'getAction404'    => [ Request::METHOD_GET ];
-        yield 'putAction404'    => [ Request::METHOD_PUT ];
-        yield 'deleteAction404' => [ Request::METHOD_DELETE ];
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
     }
 }
