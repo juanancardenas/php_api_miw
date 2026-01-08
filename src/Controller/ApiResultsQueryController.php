@@ -6,7 +6,6 @@ use App\Entity\Result;
 use App\Entity\User;
 use App\Utility\Utils;
 use Doctrine\ORM\EntityManagerInterface;
-use Exception;
 use Symfony\Component\HttpFoundation\{Exception\JsonException, Request, Response};
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -225,16 +224,12 @@ class ApiResultsQueryController extends AbstractController implements ApiResults
             : ['user' => $loggedUser];
 
         // Se hace la consulta
-        $results = $this->entityManager
+        return $this->entityManager
             ->getRepository(Result::class)
             ->findBy(
                 $criteria,
                 [$order => 'ASC']
             );
-
-        return empty($results)
-            ? throw new HttpException(Response::HTTP_NOT_FOUND, self::MSG_NOT_FOUND)
-            : $results;
     }
 
     /**

@@ -172,7 +172,7 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
             $result->setResult($postData->get(Result::RESULT_ATTR));
             // Sólo el administrador podría cambiar el usuario del resultado
             if ($this->isGranted(ApiResultsQueryInterface::ROLE_ADMIN)) {
-                $result->setUser($this->getNewUser($result, $postData));
+                $result->setUser($this->getNewUser($postData));
             }
 
             // Actualizar el Result en BD
@@ -338,25 +338,20 @@ class ApiResultsCommandController extends AbstractController implements ApiResul
 
     /**
      * Obtiene el usuario de la petición PUT (Sólo para Admin)
-     * @param Result $result
      * @param InputBag $postData
      * @return User
      */
-    private function getNewUser(Result $result, InputBag $postData): User {
+    private function getNewUser(InputBag $postData): User {
 
-        if ($result->getUser() !== $postData->get(Result::USER_ATTR)) {
-            // Buscar el usuario indicado en la request
-            $user = $this->entityManager
-                ->getRepository(User::class)
-                ->find($postData->get(Result::USERID_ATTR));
+        // Buscar el usuario indicado en la request
+        $user = $this->entityManager
+            ->getRepository(User::class)
+            ->find($postData->get(Result::USERID_ATTR));
 
-            if ($user instanceof User) {
-                return $user;
-            } else {
-                throw new HttpException(Response::HTTP_UNPROCESSABLE_ENTITY,self::MSG_WRONG_USERID);
-            }
+        if ($user instanceof User) {
+            return $user;
         } else {
-            return $result->getUser();
+            throw new HttpException(Response::HTTP_UNPROCESSABLE_ENTITY,self::MSG_WRONG_USERID);
         }
     }
 

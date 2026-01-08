@@ -416,6 +416,37 @@ class ApiResultsControllerTest extends BaseTestCase
 
     // Añado una serie de tests para buscar acercarme al 100% en el coverage report
 
+    #[Depends('testPostResultAction201Created')]
+    public function testPutResultAction422WrongNewUser(array $result): void
+    {
+        $p_data = [
+            Result::RESULT_ATTR => self::$faker->numberBetween(1, 10000),
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::USERID_ATTR => '9999' // No existe
+        ];
+
+        self::$client->request(
+            Request::METHOD_HEAD,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            self::$adminHeaders  // Admin
+        );
+
+        $etag = self::$client->getResponse()->getEtag();
+        self::assertNotEmpty($etag);
+
+        self::$client->request(
+            Request::METHOD_PUT,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            array_merge(self::$adminHeaders, ['HTTP_If-Match' => $etag]),  // Admin
+            json_encode($p_data)
+        );
+
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_UNPROCESSABLE_ENTITY, $response->getStatusCode());
+    }
+
     public function testPostResultNonAdminWithUserIdNotAllowed(): void
     {
         $payload = [
@@ -427,8 +458,7 @@ class ApiResultsControllerTest extends BaseTestCase
         self::$client->request(
             Request::METHOD_POST,
             self::RUTA_API,
-            [],
-            [],
+            [], [],
             self::$userHeaders,
             json_encode($payload)
         );
@@ -446,8 +476,7 @@ class ApiResultsControllerTest extends BaseTestCase
         self::$client->request(
             Request::METHOD_POST,
             self::RUTA_API,
-            [],
-            [],
+            [], [],
             self::$adminHeaders,
             json_encode($payload)
         );
@@ -469,8 +498,7 @@ class ApiResultsControllerTest extends BaseTestCase
         self::$client->request(
             Request::METHOD_POST,
             self::RUTA_API,
-            [],
-            [],
+            [], [],
             self::$adminHeaders,
             json_encode($payload)
         );
