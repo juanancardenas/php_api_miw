@@ -606,7 +606,7 @@ components:
           schema:
             $ref: '#/components/schemas/Message'
           examples:
-            response-422:
+            response-500:
               $ref: '#/components/examples/response-500'
 
   requestBodies:

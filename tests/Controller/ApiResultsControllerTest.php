@@ -313,54 +313,98 @@ class ApiResultsControllerTest extends BaseTestCase
     }
 
     /**
-     * Test DELETE /results/{resultId} 204 No Content
-     * @param array<string,string> $result result returned by testPutResultAction209ContentReturned()
-     * @return int resultId
+     * Test PUT /results/{resultId} 200 OK
+     * El administrador podrá cambiar el usuario del resultado
+     * @param array $result
+     * @return int
      */
     #[Depends('testPutResultAction209ContentReturned')]
-    #[Depends('testHeadResultAction200Ok')]
-    #[Depends('testGetResultAction200Ok')]
     #[Depends('testPutResultActionEtagConcurrency')]
-    public function testDeleteResultAction204NoContent(array $result): int
+    #[Depends('testGetResultAction200Ok')]
+    #[Depends('testHeadResultAction200Ok')]
+    public function testPutResultAction209ChangeUserByAdmin(array $result): int
     {
-        // El usuario puede borrar su resultado
+        $new_result = self::$faker->numberBetween(1, 10000);
+        // Aunque lo ha creado el administrador, el usuario podrá actualizar este resultado.
+        $p_data = [
+            Result::RESULT_ATTR => $new_result,
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::USERID_ATTR => '1' // Pasa del user al admin
+        ];
+
         self::$client->request(
-            Request::METHOD_DELETE,
+            Request::METHOD_HEAD,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [], [], self::$userHeaders
+            [], [],
+            self::$adminHeaders  // Admin
         );
+
+        $etag = self::$client->getResponse()->getEtag();
+        self::assertNotEmpty($etag);
+
+        self::$client->request(
+            Request::METHOD_PUT,
+            self::RUTA_API . '/' . $result[Result::ID_ATTR],
+            [], [],
+            array_merge(self::$adminHeaders, ['HTTP_If-Match' => $etag]),  // Admin
+            json_encode($p_data)
+        );
+
         $response = self::$client->getResponse();
+        self::assertSame(209, $response->getStatusCode());
 
-        self::assertSame(Response::HTTP_NO_CONTENT, $response->getStatusCode());
-        self::assertEmpty($response->getContent());
+        $body = json_decode((string)$response->getContent(), true);
+        $result_aux = $body[0];
 
-        // Si hacemos una consulta, no debe aparecer
+        self::assertSame($result[Result::ID_ATTR], $result_aux[Result::ID_ATTR]);
+        self::assertSame($p_data[Result::RESULT_ATTR], $result_aux[Result::RESULT_ATTR]);
+
+        // GET para validar persistencia
         self::$client->request(
             Request::METHOD_GET,
             self::RUTA_API . '/' . $result[Result::ID_ATTR],
-            [], [], self::$userHeaders
+            [], [], self::$adminHeaders // Ya no es visible para user
         );
-        $response = self::$client->getResponse();
-        self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
 
-        return intval($result[Result::RESULT_ATTR]);
+        $getResponse = self::$client->getResponse();
+        self::assertSame(Response::HTTP_OK, $getResponse->getStatusCode());
+
+        $getBody = json_decode((string)$getResponse->getContent(), true);
+        $fetchedResult = $getBody['result'] ?? null;
+        self::assertNotNull($fetchedResult);
+
+        // Comparar que el valor 'result' coincide con $new_result
+        self::assertSame(1,$fetchedResult['user']['id']);
+
+        return $result[Result::ID_ATTR];
     }
 
     /**
-     * Test DELETE /results/{resultId} 404 Not Found
+     * Test DELETE /results/{resultId} 204 No Content
      * @param int $resultId
      */
-    #[Depends('testDeleteResultAction204NoContent')]
-    public function testDeleteResultAction404NotFound(int $resultId): void
+    #[Depends('testPutResultAction209ChangeUserByAdmin')]
+    public function testDeleteResultAction204NoContent(int $resultId): void
     {
+        // El usuario ya no puede borrar el resultado
         self::$client->request(
-            Request::METHOD_GET,
+            Request::METHOD_DELETE,
             self::RUTA_API . '/' . $resultId,
             [], [], self::$userHeaders
         );
         $response = self::$client->getResponse();
         self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
 
+        self::$client->request(
+            Request::METHOD_DELETE,
+            self::RUTA_API . '/' . $resultId,
+            [], [], self::$adminHeaders
+        );
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_NO_CONTENT, $response->getStatusCode());
+        self::assertEmpty($response->getContent());
+
+        // Si hacemos una consulta, no debe aparecer
         self::$client->request(
             Request::METHOD_GET,
             self::RUTA_API . '/' . $resultId,
@@ -368,5 +412,73 @@ class ApiResultsControllerTest extends BaseTestCase
         );
         $response = self::$client->getResponse();
         self::assertSame(Response::HTTP_NOT_FOUND, $response->getStatusCode());
+    }
+
+    // Añado una serie de tests para buscar acercarme al 100% en el coverage report
+
+    public function testPostResultNonAdminWithUserIdNotAllowed(): void
+    {
+        $payload = [
+            Result::RESULT_ATTR => 100,
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::USERID_ATTR => 1 // NO permitido para no-admin
+        ];
+
+        self::$client->request(
+            Request::METHOD_POST,
+            self::RUTA_API,
+            [],
+            [],
+            self::$userHeaders,
+            json_encode($payload)
+        );
+
+        $response = self::$client->getResponse();
+        self::assertSame(Response::HTTP_BAD_REQUEST, $response->getStatusCode());
+    }
+
+    public function testPostResultWithoutTime(): void
+    {
+        $payload = [
+            Result::RESULT_ATTR => 10,
+        ];
+
+        self::$client->request(
+            Request::METHOD_POST,
+            self::RUTA_API,
+            [],
+            [],
+            self::$adminHeaders,
+            json_encode($payload)
+        );
+
+        self::assertSame(
+            Response::HTTP_BAD_REQUEST,
+            self::$client->getResponse()->getStatusCode()
+        );
+    }
+
+    public function testPostResultAdminWithNonExistingUser(): void
+    {
+        $payload = [
+            Result::RESULT_ATTR => 50,
+            Result::TIME_ATTR   => new DateTime()->format(DATE_ATOM),
+            Result::USERID_ATTR => 999999 // No existe
+        ];
+
+        self::$client->request(
+            Request::METHOD_POST,
+            self::RUTA_API,
+            [],
+            [],
+            self::$adminHeaders,
+            json_encode($payload)
+        );
+
+        $response = self::$client->getResponse();
+        self::assertSame(
+            Response::HTTP_UNPROCESSABLE_ENTITY,
+            $response->getStatusCode()
+        );
     }
 }
